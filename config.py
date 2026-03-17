@@ -1,14 +1,31 @@
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-CONNIE_BASE_URL    = os.getenv("CONNIE_BASE_URL", "https://concierge-lite.sykescottages.co.uk")
-CONNIE_USERNAME    = os.getenv("CONNIE_USERNAME")
-CONNIE_PASSWORD    = os.getenv("CONNIE_PASSWORD")
-ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY")
-OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY")
-JUDGE_MODEL        = os.getenv("JUDGE_MODEL", "claude-sonnet-4-20250514")
-DB_PATH            = os.getenv("DB_PATH", "results/eval_results.db")
-EVAL_DATASET_PATH  = os.getenv("EVAL_DATASET_PATH", "data/connie_eval_full.jsonl")
+try:
+    import streamlit as st
+    _secrets = st.secrets
+except Exception:
+    _secrets = {}
+
+def _get(key, default=None):
+    val = os.getenv(key)
+    if val:
+        return val
+    if hasattr(_secrets, "get"):
+        return _secrets.get(key, default)
+    return default
+
+CONNIE_BASE_URL    = _get("CONNIE_BASE_URL", "https://concierge-lite.sykescottages.co.uk")
+CONNIE_USERNAME    = _get("CONNIE_USERNAME")
+CONNIE_PASSWORD    = _get("CONNIE_PASSWORD")
+ANTHROPIC_API_KEY  = _get("ANTHROPIC_API_KEY")
+OPENAI_API_KEY     = _get("OPENAI_API_KEY")
+JUDGE_MODEL        = _get("JUDGE_MODEL", "gpt-4o-mini")
+DB_PATH            = _get("DB_PATH", "results/eval_results.db")
+EVAL_DATASET_PATH  = _get("EVAL_DATASET_PATH", "data/connie_eval_full.jsonl")
 PASS_THRESHOLD     = 2
