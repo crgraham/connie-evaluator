@@ -1,19 +1,24 @@
+from connie_client import send_message
 import json
 import argparse
+import uuid
+import time
 from datetime import datetime
 from config import EVAL_DATASET_PATH
 from evaluators.deterministic import run_all_deterministic
 from evaluators.llm_judge import judge_response
-from db import init_db, save_result
+from db import init_db, save_result, save_run_meta
 
 def load_dataset(path):
     with open(path, encoding="utf-8") as f:
         return [json.loads(l) for l in f if l.strip()]
 
-def run_pipeline(limit=None, section_filter=None, run_id=None, delay=1.5, dry_run=False, dataset_path=None, skip=0):
-    init_db()
+def run_pipeline(limit=None, section_filter=None, run_id=None, delay=1.5, dry_run=False, dataset_path=None, skip=0, iteration="untagged"):
     run_id = run_id or f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    cases  = load_dataset(dataset_path or EVAL_DATASET_PATH)
+    init_db()
+    save_run_meta(run_id, dataset_path or EVAL_DATASET_PATH, iteration)
+
+    cases = load_dataset(dataset_path or EVAL_DATASET_PATH)
 
     if section_filter:
         cases = [c for c in cases if c.get("section") == section_filter]
@@ -23,10 +28,11 @@ def run_pipeline(limit=None, section_filter=None, run_id=None, delay=1.5, dry_ru
         cases = cases[:limit]
 
     print(f"\n{'='*60}")
-    print(f"Run ID  : {run_id}")
-    print(f"Cases   : {len(cases)}")
-    print(f"Section : {section_filter or 'ALL'}")
-    print(f"Dry run : {dry_run}")
+    print(f"Run ID    : {run_id}")
+    print(f"Iteration : {iteration}")
+    print(f"Cases     : {len(cases)}")
+    print(f"Section   : {section_filter or 'ALL'}")
+    print(f"Dry run   : {dry_run}")
     print(f"{'='*60}\n")
 
     if not dry_run:
@@ -37,24 +43,35 @@ def run_pipeline(limit=None, section_filter=None, run_id=None, delay=1.5, dry_ru
 
     for i, case in enumerate(cases):
         case_id = case["case_id"]
-        query   = case["query"]["user_message"]
         gt      = case["ground_truth"]
         section = case.get("section", "?")
+        turns   = case.get("turns")
+
+        if turns:
+            query = turns[-1].get("text", "multi-turn")
+        else:
+            query = case.get("query", {}).get("user_message", "")
 
         print(f"[{i+1:3d}/{len(cases)}] {case_id} ({section}) | {query[:55]}")
 
         if dry_run:
             actual_response = f"[DRY RUN response for: {query}]"
+            connie_result = {"response_text": actual_response, "tool_inputs": [], "search_params": {}}
         else:
-            import time
-            time.sleep(delay)
             try:
-                actual_response = client.query(query)
+                turns = case.get("turns")
+                if turns:
+                    connie_result = client.run_conversation(turns, delay=delay)
+                else:
+                    time.sleep(delay)
+                    connie_result = send_message(query, str(uuid.uuid4()))
+                actual_response = connie_result.get("response_text", "")
                 if not actual_response:
                     raise ValueError("Empty response from Connie")
             except Exception as e:
                 print(f"  error: {e}")
                 actual_response = f"ERROR: {e}"
+                connie_result = {"response_text": actual_response, "tool_inputs": [], "search_params": {}}
 
         det_results = run_all_deterministic(actual_response, gt["expected_action"])
 
@@ -93,13 +110,14 @@ def run_pipeline(limit=None, section_filter=None, run_id=None, delay=1.5, dry_ru
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--limit",   type=int,   default=None)
-    parser.add_argument("--section", type=str,   default=None)
-    parser.add_argument("--run-id",  type=str,   default=None)
-    parser.add_argument("--delay",   type=float, default=1.5)
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--skip", type=int, default=0)
-    parser.add_argument("--dataset", type=str, default=None)
+    parser.add_argument("--limit",     type=int,   default=None)
+    parser.add_argument("--section",   type=str,   default=None)
+    parser.add_argument("--run-id",    type=str,   default=None)
+    parser.add_argument("--delay",     type=float, default=1.5)
+    parser.add_argument("--dry-run",   action="store_true")
+    parser.add_argument("--skip",      type=int,   default=0)
+    parser.add_argument("--dataset",   type=str,   default=None)
+    parser.add_argument("--iteration", type=str,   default="untagged")
     args = parser.parse_args()
 
     run_pipeline(
@@ -109,5 +127,6 @@ if __name__ == "__main__":
         delay=args.delay,
         dry_run=args.dry_run,
         skip=args.skip,
-        dataset_path=args.dataset
+        dataset_path=args.dataset,
+        iteration=args.iteration
     )

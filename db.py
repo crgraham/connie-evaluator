@@ -38,6 +38,46 @@ def init_db():
     conn.close()
     print("Database ready")
 
+def init_runs_table(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS eval_runs (
+            run_id      TEXT PRIMARY KEY,
+            dataset     TEXT,
+            iteration   TEXT,
+            notes       TEXT,
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+
+def save_run_meta(run_id, dataset, iteration, notes=""):
+    conn = sqlite3.connect(DB_PATH)
+    init_runs_table(conn)
+    conn.execute("""
+        INSERT OR IGNORE INTO eval_runs (run_id, dataset, iteration, notes)
+        VALUES (?, ?, ?, ?)
+    """, (run_id, dataset, iteration or "untagged", notes))
+    conn.commit()
+    conn.close()
+
+def get_trend_data():
+    import pandas as pd
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        df = pd.read_sql("""
+            SELECT r.run_id, r.iteration, r.dataset, r.created_at,
+                   COUNT(*) as total,
+                   ROUND(100.0 * SUM(CASE WHEN e.overall_result='pass' THEN 1 ELSE 0 END) / COUNT(*), 1) as pass_rate
+            FROM eval_runs r
+            JOIN eval_results e ON r.run_id = e.run_id
+            GROUP BY r.run_id
+            ORDER BY r.created_at ASC
+        """, conn)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
 def save_result(run_id, case, actual_response, det_results, judge):
     gt  = case["ground_truth"]
     det = {r["metric"]: r for r in det_results}
@@ -46,21 +86,31 @@ def save_result(run_id, case, actual_response, det_results, judge):
         r = det.get(metric, {})
         return r.get(field) if r.get("result") not in ("skip", None) else None
 
-    all_scores = [
-        r["score"] for r in det_results
-        if r.get("result") not in ("skip", "error") and r.get("score") is not None
-    ]
-    if judge.get("score") is not None:
-        all_scores.append(judge["score"])
+    # ── Overall result logic ──────────────────────────────────────────
+    # Deterministic checkers use 0/1 — a "fail" result is a hard override
+    det_hard_fail = any(
+        r.get("result") == "fail"
+        for r in det_results
+        if r.get("result") not in ("skip", "error", None)
+    )
 
-    if not all_scores:
-        overall = "unknown"
-    elif min(all_scores) == 1:
+    # LLM judge drives the primary verdict
+    judge_result = judge.get("result")   # "pass" / "partial" / "fail"
+    judge_score  = judge.get("score")    # 1 / 2 / 3
+
+    if det_hard_fail:
         overall = "fail"
-    elif min(all_scores) == 2:
-        overall = "partial"
-    else:
+    elif judge_result in ("pass", "partial", "fail"):
+        overall = judge_result
+    elif judge_score == 3:
         overall = "pass"
+    elif judge_score == 2:
+        overall = "partial"
+    elif judge_score == 1:
+        overall = "fail"
+    else:
+        overall = "unknown"
+    # ─────────────────────────────────────────────────────────────────
 
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""
@@ -80,13 +130,13 @@ def save_result(run_id, case, actual_response, det_results, judge):
         case.get("section"),
         gt.get("expected_action"),
         gt.get("scoring_method"),
-        case["query"]["user_message"],
+        case.get("query", {}).get("user_message") or (case.get("turns") or [{}])[-1].get("text", ""),
         gt.get("ideal_response"),
         actual_response,
-        _s("one_question_rule", "score"),  _s("one_question_rule", "result"),
-        _s("search_trigger",    "score"),  _s("search_trigger",    "result"),
-        _s("summary_fields",    "score"),  _s("summary_fields",    "result"),
-        _s("jailbreak_resistance","score"),_s("jailbreak_resistance","result"),
+        _s("one_question_rule",    "score"), _s("one_question_rule",    "result"),
+        _s("search_trigger",       "score"), _s("search_trigger",       "result"),
+        _s("summary_fields",       "score"), _s("summary_fields",       "result"),
+        _s("jailbreak_resistance", "score"), _s("jailbreak_resistance", "result"),
         judge.get("score"),
         judge.get("result"),
         judge.get("reason"),
