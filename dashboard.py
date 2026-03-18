@@ -2,13 +2,49 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 import json
+import hashlib
 import plotly.express as px
-from config import DB_PATH
+from config import DB_PATH, ANTHROPIC_API_KEY
 from db import get_trend_data
 
 st.set_page_config(page_title='Connie Eval Dashboard', layout='wide')
-st.title('Connie Evaluator Dashboard')
 
+# ── Access control ────────────────────────────────────────────────────
+def init_auth():
+    if "is_admin" not in st.session_state:
+        st.session_state["is_admin"] = False
+    if "auth_attempted" not in st.session_state:
+        st.session_state["auth_attempted"] = False
+
+def try_login(password_input):
+    correct = st.secrets.get("APP_PASSWORD", "")
+    if password_input and password_input == correct:
+        st.session_state["is_admin"] = True
+    else:
+        st.session_state["is_admin"] = False
+    st.session_state["auth_attempted"] = True
+
+init_auth()
+
+with st.sidebar:
+    st.markdown("---")
+    if st.session_state["is_admin"]:
+        st.success("Admin mode")
+        if st.button("Log out"):
+            st.session_state["is_admin"] = False
+            st.session_state["auth_attempted"] = False
+            st.rerun()
+    else:
+        with st.expander("Admin login"):
+            pwd = st.text_input("Password", type="password", key="pwd_input")
+            if st.button("Login"):
+                try_login(pwd)
+                st.rerun()
+        st.caption("Viewing in read-only mode")
+
+is_admin = st.session_state.get("is_admin", False)
+
+# ── Section labels ────────────────────────────────────────────────────
 SECTION_LABELS = {
     "A": "A — Greetings & Opening",
     "B": "B — Slot Filling: Location",
@@ -25,11 +61,30 @@ SECTION_LABELS = {
     "M": "M — One-Question Rule",
     "N": "N — Escalation",
     "O": "O — Contextual Inference",
+    "manner":             "Manner — Clarity & Order",
+    "quality":            "Quality — Hallucination & Correctness",
+    "relation":           "Relation — Relevance",
+    "quantity":           "Quantity — Conciseness",
+    "memory_persistence": "Memory Persistence",
+    "multi_turn_context": "Multi-Turn Context",
+    "budget_boundary":    "Budget Boundary",
+    "no_results":         "No Results Handling",
+    "emoji_count":           "ToV — Emoji Count",
+    "no_emoji_bad_news":     "ToV — No Emoji Bad News",
+    "no_negative_emoji":     "ToV — No Negative Emoji",
+    "concierge_register":    "ToV — Concierge Register",
+    "neutral_presentation":  "ToV — Neutral Presentation",
+    "infer_amenity":         "ToV — Infer Amenity",
+    "formal_context_no_emoji":"ToV — Formal Context",
+    "redirect_tone":         "ToV — Redirect Tone",
+    "response_brevity":      "ToV — Response Brevity",
+    "edge_cases":            "ToV — Edge Cases",
 }
 
 def label(s):
     return SECTION_LABELS.get(s, s)
 
+# ── DB helpers ────────────────────────────────────────────────────────
 def get_run_ids():
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -71,7 +126,9 @@ def section_summary(df):
         }), include_groups=False
     ).reset_index(drop=True)
 
-# ── Sidebar ───────────────────────────────────────────────────────────
+# ── Sidebar filters ───────────────────────────────────────────────────
+st.title('Connie Evaluator Dashboard')
+
 run_ids = get_run_ids()
 if not run_ids:
     st.warning('No eval runs found. Run: python pipeline.py --limit 5 --dry-run')
@@ -192,9 +249,13 @@ with tab3:
                         st.markdown(f"**Prompt section:** {s['prompt_section']}")
                         st.markdown(f"**Issue:** {s['issue']}")
                         st.success(f"**Suggested fix:** {s['suggestion']}")
+
 with tab4:
     st.subheader('Tone of Voice Lab')
-    st.caption('Step 1: Generate a revision based on failing cases. Step 2: Run Judge to compare. Step 3: Save if better.')
+    if is_admin:
+        st.caption('Step 1: Generate a revision based on failing cases. Step 2: Run Judge to compare. Step 3: Save if better.')
+    else:
+        st.caption('Read-only view. Log in as admin to generate revisions and run the judge.')
 
     import anthropic as ant
     import os
@@ -206,7 +267,6 @@ with tab4:
     except FileNotFoundError:
         current_prompt = ""
 
-    # ── Session state for generated revision ─────────────────────
     if 'generated_revision' not in st.session_state:
         st.session_state.generated_revision = current_prompt
 
@@ -220,30 +280,31 @@ with tab4:
         'Number of cases to use',
         min_value=1,
         max_value=min(20, max(1, n_fails)),
-        value=min(8, max(1, n_fails))
+        value=min(15, max(1, n_fails)),
+        disabled=not is_admin
     )
     sample = tov_fails.head(max_cases)
 
     # ── Step 1: Generate revision ─────────────────────────────────
     st.markdown('### Step 1 — Generate revision')
-    if st.button('Generate revision', disabled=(n_fails == 0)):
-        from config import ANTHROPIC_API_KEY as api_key
-        if not api_key:
-            st.error('ANTHROPIC_API_KEY not set')
-        else:
-            client = ant.Anthropic(api_key=api_key)
-            cases_text = "\n\n".join([
-                f"Case {r['case_id']} ({label(r['section'])}):\n"
-                f"  Query: {r['query']}\n"
-                f"  Expected action: {r['expected_action']}\n"
-                f"  Pass criteria: {r.get('pass_criteria','')}\n"
-                f"  Fail criteria: {r.get('fail_criteria','')}\n"
-                f"  Actual response: {str(r['actual_response'])[:300]}\n"
-                f"  Judge reason: {r['judge_reason']}"
-                for _, r in sample.iterrows()
-            ])
-
-            generate_prompt = f"""You are a prompt engineer improving a tone of voice prompt for Connie, a UK holiday cottage booking assistant for Sykes Holidays.
+    if is_admin:
+        if st.button('Generate revision', disabled=(n_fails == 0)):
+            api_key = ANTHROPIC_API_KEY
+            if not api_key:
+                st.error('ANTHROPIC_API_KEY not set')
+            else:
+                client = ant.Anthropic(api_key=api_key)
+                cases_text = "\n\n".join([
+                    f"Case {r['case_id']} ({label(r['section'])}):\n"
+                    f"  Query: {r['query']}\n"
+                    f"  Expected action: {r['expected_action']}\n"
+                    f"  Pass criteria: {r.get('pass_criteria','')}\n"
+                    f"  Fail criteria: {r.get('fail_criteria','')}\n"
+                    f"  Actual response: {str(r['actual_response'])[:300]}\n"
+                    f"  Judge reason: {r['judge_reason']}"
+                    for _, r in sample.iterrows()
+                ])
+                generate_prompt = f"""You are a prompt engineer improving a tone of voice prompt for Connie, a UK holiday cottage booking assistant for Sykes Holidays.
 
 Here is the current prompt:
 {current_prompt}
@@ -258,51 +319,74 @@ Your task:
 4. Do not add unnecessary length
 5. Return ONLY the revised prompt text, no explanation, no preamble"""
 
-            with st.spinner('Generating revision...'):
-                try:
-                    resp = client.messages.create(
-                        model='claude-sonnet-4-20250514',
-                        max_tokens=2000,
-                        messages=[{'role': 'user', 'content': generate_prompt}]
-                    )
-                    st.session_state.generated_revision = resp.content[0].text.strip()
-                    st.success('Revision generated. Review it in the panel below, then run the judge.')
-                except Exception as e:
-                    st.error(f'Generation failed: {e}')
+                with st.spinner('Generating revision...'):
+                    try:
+                        resp = client.messages.create(
+                            model='claude-sonnet-4-20250514',
+                            max_tokens=2000,
+                            messages=[{'role': 'user', 'content': generate_prompt}]
+                        )
+                        st.session_state.generated_revision = resp.content[0].text.strip()
+                        st.success('Revision generated. Review it below, then run the judge.')
+                    except Exception as e:
+                        st.error(f'Generation failed: {e}')
+    else:
+        st.info('Log in as admin to generate revisions.')
 
-    # ── Side by side prompt panels ────────────────────────────────
+    # ── Step 2: Review panels ─────────────────────────────────────
     st.markdown('### Step 2 — Review & edit')
     col1, col2 = st.columns(2)
     with col1:
         st.markdown('**Current prompt**')
-        current_display = st.text_area(
-            'current_prompt_area',
-            value=current_prompt,
-            height=400,
-            label_visibility='collapsed'
-        )
+        if is_admin:
+            current_display = st.text_area(
+                'current_prompt_area',
+                value=current_prompt,
+                height=400,
+                label_visibility='collapsed'
+            )
+        else:
+            st.text_area(
+                'current_prompt_area',
+                value=current_prompt,
+                height=400,
+                label_visibility='collapsed',
+                disabled=True
+            )
+            current_display = current_prompt
+
     with col2:
         st.markdown('**Proposed revision**')
-        proposed_display = st.text_area(
-            'proposed_prompt_area',
-            value=st.session_state.generated_revision,
-            height=400,
-            label_visibility='collapsed'
-        )
+        if is_admin:
+            proposed_display = st.text_area(
+                'proposed_prompt_area',
+                value=st.session_state.generated_revision,
+                height=400,
+                label_visibility='collapsed'
+            )
+        else:
+            st.text_area(
+                'proposed_prompt_area',
+                value=st.session_state.generated_revision,
+                height=400,
+                label_visibility='collapsed',
+                disabled=True
+            )
+            proposed_display = st.session_state.generated_revision
 
     # ── Step 3: Run judge ─────────────────────────────────────────
     st.markdown('### Step 3 — Run judge')
-    if st.button('Run Judge', disabled=(n_fails == 0)):
-        from config import ANTHROPIC_API_KEY as api_key
-        if not api_key:
-            st.error('ANTHROPIC_API_KEY not set')
-        else:
-            client = ant.Anthropic(api_key=api_key)
-            results = []
-
-            with st.spinner(f'Judging {len(sample)} cases...'):
-                for _, row in sample.iterrows():
-                    judge_prompt = f"""You are evaluating two versions of a tone of voice prompt for Connie, a holiday booking assistant for Sykes Holidays.
+    if is_admin:
+        if st.button('Run Judge', disabled=(n_fails == 0)):
+            api_key = ANTHROPIC_API_KEY
+            if not api_key:
+                st.error('ANTHROPIC_API_KEY not set')
+            else:
+                client = ant.Anthropic(api_key=api_key)
+                results = []
+                with st.spinner(f'Judging {len(sample)} cases...'):
+                    for _, row in sample.iterrows():
+                        judge_prompt = f"""You are evaluating two versions of a tone of voice prompt for Connie, a holiday booking assistant for Sykes Holidays.
 
 CURRENT PROMPT:
 {current_display}
@@ -325,67 +409,69 @@ Respond in JSON only:
   "current_score": 1,
   "proposed_score": 1
 }}"""
-                    try:
-                        resp = client.messages.create(
-                            model='claude-sonnet-4-20250514',
-                            max_tokens=300,
-                            messages=[{'role': 'user', 'content': judge_prompt}]
-                        )
-                        raw = resp.content[0].text.strip()
-                        if raw.startswith('```'):
-                            raw = '\n'.join(raw.split('\n')[1:-1])
-                        verdict = json.loads(raw)
-                        verdict['case_id'] = row['case_id']
-                        verdict['section'] = label(row['section'])
-                        verdict['query']   = row['query'][:80]
-                        results.append(verdict)
-                    except Exception as e:
-                        results.append({
-                            'case_id': row['case_id'],
-                            'section': label(row['section']),
-                            'query':   row['query'][:80],
-                            'winner':  'error',
-                            'reason':  str(e),
-                            'current_score': None,
-                            'proposed_score': None
-                        })
+                        try:
+                            resp = client.messages.create(
+                                model='claude-sonnet-4-20250514',
+                                max_tokens=300,
+                                messages=[{'role': 'user', 'content': judge_prompt}]
+                            )
+                            raw = resp.content[0].text.strip()
+                            if raw.startswith('```'):
+                                raw = '\n'.join(raw.split('\n')[1:-1])
+                            verdict = json.loads(raw)
+                            verdict['case_id'] = row['case_id']
+                            verdict['section'] = label(row['section'])
+                            verdict['query']   = row['query'][:80]
+                            results.append(verdict)
+                        except Exception as e:
+                            results.append({
+                                'case_id': row['case_id'],
+                                'section': label(row['section']),
+                                'query':   row['query'][:80],
+                                'winner':  'error',
+                                'reason':  str(e),
+                                'current_score': None,
+                                'proposed_score': None
+                            })
 
-            winners = [r['winner'] for r in results if r['winner'] != 'error']
-            current_wins  = winners.count('current')
-            proposed_wins = winners.count('proposed')
-            ties          = winners.count('tie')
+                winners       = [r['winner'] for r in results if r['winner'] != 'error']
+                current_wins  = winners.count('current')
+                proposed_wins = winners.count('proposed')
+                ties          = winners.count('tie')
 
-            st.markdown('---')
-            st.markdown('### Verdict')
-            mc1, mc2, mc3 = st.columns(3)
-            mc1.metric('Current wins',  current_wins)
-            mc2.metric('Proposed wins', proposed_wins)
-            mc3.metric('Ties',          ties)
+                st.markdown('---')
+                st.markdown('### Verdict')
+                mc1, mc2, mc3 = st.columns(3)
+                mc1.metric('Current wins',  current_wins)
+                mc2.metric('Proposed wins', proposed_wins)
+                mc3.metric('Ties',          ties)
 
-            if proposed_wins > current_wins:
-                st.success('Proposed prompt performs better on these cases.')
-            elif current_wins > proposed_wins:
-                st.warning('Current prompt performs better — reconsider the revision.')
-            else:
-                st.info('Too close to call — try more cases.')
+                if proposed_wins > current_wins:
+                    st.success('Proposed prompt performs better on these cases.')
+                elif current_wins > proposed_wins:
+                    st.warning('Current prompt performs better — reconsider the revision.')
+                else:
+                    st.info('Too close to call — try more cases.')
 
-            results_df = pd.DataFrame(results)
-            st.dataframe(
-                results_df[['case_id', 'section', 'query', 'winner',
-                             'current_score', 'proposed_score', 'reason']],
-                use_container_width=True, hide_index=True)
+                results_df = pd.DataFrame(results)
+                st.dataframe(
+                    results_df[['case_id', 'section', 'query', 'winner',
+                                'current_score', 'proposed_score', 'reason']],
+                    use_container_width=True, hide_index=True)
 
-            # ── Step 4: Save ──────────────────────────────────────
-            st.markdown('### Step 4 — Save')
-            if proposed_wins > current_wins:
-                if st.button('Save proposed as current prompt'):
-                    with open('prompts/tov_prompt.md', 'w', encoding='utf-8') as f:
-                        f.write(proposed_display)
-                    st.session_state.generated_revision = proposed_display
-                    st.success('Saved locally. Run: git add prompts/tov_prompt.md && git commit -m "Update ToV prompt" && git push origin main')
-            else:
-                st.info('Proposed did not outperform current — nothing saved.')
-                
+                # ── Step 4: Save ──────────────────────────────────
+                st.markdown('### Step 4 — Save')
+                if proposed_wins > current_wins:
+                    if st.button('Save proposed as current prompt'):
+                        with open('prompts/tov_prompt.md', 'w', encoding='utf-8') as f:
+                            f.write(proposed_display)
+                        st.session_state.generated_revision = proposed_display
+                        st.success('Saved locally. Run: git add prompts/tov_prompt.md && git commit -m "Update ToV prompt" && git push origin main')
+                else:
+                    st.info('Proposed did not outperform current — nothing saved.')
+    else:
+        st.info('Log in as admin to run the judge.')
+
 # ── Run summary ───────────────────────────────────────────────────────
 st.markdown('---')
 st.subheader('Run Summary')
