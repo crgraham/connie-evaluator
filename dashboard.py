@@ -280,7 +280,7 @@ with tab4:
         'Number of cases to use',
         min_value=1,
         max_value=n_fails,
-        value=n_fails,,
+        value=n_fails,
         disabled=not is_admin
     )
     sample = tov_fails.head(max_cases)
