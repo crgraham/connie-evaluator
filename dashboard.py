@@ -157,7 +157,7 @@ else:
 
 # ── Tabs ──────────────────────────────────────────────────────────────
 st.markdown('---')
-tab1, tab2, tab3 = st.tabs(['Results', 'Section Summary', 'Prompt Suggestions'])
+tab1, tab2, tab3, tab4 = st.tabs(['Results', 'Section Summary', 'Prompt Suggestions', 'Tone of Voice Lab'])
 
 with tab1:
     st.subheader('Case results')
@@ -192,7 +192,140 @@ with tab3:
                         st.markdown(f"**Prompt section:** {s['prompt_section']}")
                         st.markdown(f"**Issue:** {s['issue']}")
                         st.success(f"**Suggested fix:** {s['suggestion']}")
+with tab4:
+    st.subheader('Tone of Voice Lab')
+    st.caption('Compare your current ToV prompt against a proposed revision. Claude judges which better handles failing cases.')
 
+    # Load current prompt
+    try:
+        with open('prompts/tov_prompt.md', encoding='utf-8') as f:
+            current_prompt = f.read()
+    except FileNotFoundError:
+        current_prompt = ""
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown('**Current prompt**')
+        current_display = st.text_area(
+            'Current ToV prompt',
+            value=current_prompt,
+            height=400,
+            label_visibility='collapsed'
+        )
+    with col2:
+        st.markdown('**Proposed revision**')
+        proposed_display = st.text_area(
+            'Proposed ToV prompt',
+            value=current_prompt,
+            height=400,
+            placeholder='Paste your revised prompt here...',
+            label_visibility='collapsed'
+        )
+
+    # Pull failing ToV cases for this run
+    tov_fails = load_results(selected_run)
+    tov_fails = tov_fails[tov_fails['overall_result'].isin(['fail', 'partial'])]
+    n_fails = len(tov_fails)
+    st.markdown(f'**{n_fails} failing/partial cases in selected run** will be used as test cases.')
+
+    max_cases = st.slider('Number of cases to judge', min_value=1, max_value=min(20, max(1, n_fails)), value=min(5, max(1, n_fails)))
+
+    if st.button('Run Judge', disabled=(n_fails == 0)):
+        import anthropic as ant
+        import os
+
+        api_key = os.getenv('ANTHROPIC_API_KEY')
+        if not api_key:
+            st.error('ANTHROPIC_API_KEY not set in .env')
+        else:
+            client = ant.Anthropic(api_key=api_key)
+            sample = tov_fails.head(max_cases)
+            results = []
+
+            with st.spinner(f'Judging {len(sample)} cases...'):
+                for _, row in sample.iterrows():
+                    judge_prompt = f"""You are evaluating two versions of a tone of voice prompt for Connie, a holiday booking assistant.
+
+CURRENT PROMPT:
+{current_display}
+
+PROPOSED PROMPT:
+{proposed_display}
+
+TEST CASE:
+User query: {row['query']}
+Connie's actual response: {row['actual_response']}
+Expected action: {row['expected_action']}
+Pass criteria: {row.get('pass_criteria', '')}
+Fail criteria: {row.get('fail_criteria', '')}
+
+Which prompt version would better produce the expected behaviour for this case?
+Respond in JSON only:
+{{
+  "winner": "current" or "proposed" or "tie",
+  "reason": "one sentence explanation",
+  "current_score": 1-3,
+  "proposed_score": 1-3
+}}"""
+
+                    try:
+                        resp = client.messages.create(
+                            model='claude-sonnet-4-20250514',
+                            max_tokens=300,
+                            messages=[{'role': 'user', 'content': judge_prompt}]
+                        )
+                        raw = resp.content[0].text.strip()
+                        # Strip markdown code fences if present
+                        if raw.startswith('```'):
+                            raw = '\n'.join(raw.split('\n')[1:-1])
+                        verdict = json.loads(raw)
+                        verdict['case_id'] = row['case_id']
+                        verdict['section'] = label(row['section'])
+                        verdict['query']   = row['query'][:80]
+                        results.append(verdict)
+                    except Exception as e:
+                        results.append({
+                            'case_id': row['case_id'],
+                            'section': label(row['section']),
+                            'query':   row['query'][:80],
+                            'winner':  'error',
+                            'reason':  str(e),
+                            'current_score': None,
+                            'proposed_score': None
+                        })
+
+            # Summary
+            winners = [r['winner'] for r in results if r['winner'] != 'error']
+            current_wins  = winners.count('current')
+            proposed_wins = winners.count('proposed')
+            ties          = winners.count('tie')
+
+            st.markdown('---')
+            st.markdown('### Verdict')
+            mc1, mc2, mc3 = st.columns(3)
+            mc1.metric('Current wins',  current_wins)
+            mc2.metric('Proposed wins', proposed_wins)
+            mc3.metric('Ties',          ties)
+
+            if proposed_wins > current_wins:
+                st.success('Proposed prompt performs better on these cases.')
+            elif current_wins > proposed_wins:
+                st.warning('Current prompt performs better — reconsider the revision.')
+            else:
+                st.info('Too close to call — try more cases.')
+
+            # Detail table
+            results_df = pd.DataFrame(results)
+            st.dataframe(
+                results_df[['case_id', 'section', 'query', 'winner', 'current_score', 'proposed_score', 'reason']],
+                use_container_width=True, hide_index=True)
+
+            # Option to save proposed as new current
+            if proposed_wins > current_wins:
+                if st.button('Save proposed as current prompt'):
+                    with open('prompts/tov_prompt.md', 'w', encoding='utf-8') as f:
+                        f.write(proposed_display)
+                    st.success('Saved. Commit and push to make it permanent.')
 # ── Run summary ───────────────────────────────────────────────────────
 st.markdown('---')
 st.subheader('Run Summary')
@@ -244,5 +377,5 @@ else:
     fig.update_layout(yaxis_range=[0, 100])
     st.plotly_chart(fig, use_container_width=True)
     st.dataframe(
-        trend_df[['run_id', 'iteration', 'dataset', 'total', 'pass_rate', 'created_at']],
+        trend_df[['iteration', 'dataset', 'total', 'pass_rate', 'created_at']],
         use_container_width=True)

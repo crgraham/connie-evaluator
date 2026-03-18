@@ -65,13 +65,18 @@ def get_trend_data():
     conn = sqlite3.connect(DB_PATH)
     try:
         df = pd.read_sql("""
-            SELECT r.run_id, r.iteration, r.dataset, r.created_at,
-                   COUNT(*) as total,
-                   ROUND(100.0 * SUM(CASE WHEN e.overall_result='pass' THEN 1 ELSE 0 END) / COUNT(*), 1) as pass_rate
+            SELECT 
+                r.iteration,
+                r.dataset,
+                COUNT(*) as total,
+                ROUND(100.0 * SUM(CASE WHEN e.overall_result='pass' THEN 1 ELSE 0 END) / COUNT(*), 1) as pass_rate,
+                MAX(r.created_at) as created_at
             FROM eval_runs r
             JOIN eval_results e ON r.run_id = e.run_id
-            GROUP BY r.run_id
-            ORDER BY r.created_at ASC
+            WHERE r.iteration != 'untagged'
+            GROUP BY r.iteration, r.dataset
+            HAVING COUNT(*) > 10
+            ORDER BY created_at ASC
         """, conn)
     except Exception:
         df = pd.DataFrame()
