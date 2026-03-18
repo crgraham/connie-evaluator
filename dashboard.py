@@ -227,9 +227,9 @@ with tab4:
     # ── Step 1: Generate revision ─────────────────────────────────
     st.markdown('### Step 1 — Generate revision')
     if st.button('Generate revision', disabled=(n_fails == 0)):
-        api_key = os.getenv('ANTHROPIC_API_KEY')
+        from config import ANTHROPIC_API_KEY as api_key
         if not api_key:
-            st.error('ANTHROPIC_API_KEY not set in .env')
+            st.error('ANTHROPIC_API_KEY not set')
         else:
             client = ant.Anthropic(api_key=api_key)
             cases_text = "\n\n".join([
@@ -293,9 +293,9 @@ Your task:
     # ── Step 3: Run judge ─────────────────────────────────────────
     st.markdown('### Step 3 — Run judge')
     if st.button('Run Judge', disabled=(n_fails == 0)):
-        api_key = os.getenv('ANTHROPIC_API_KEY')
+        from config import ANTHROPIC_API_KEY as api_key
         if not api_key:
-            st.error('ANTHROPIC_API_KEY not set in .env')
+            st.error('ANTHROPIC_API_KEY not set')
         else:
             client = ant.Anthropic(api_key=api_key)
             results = []
