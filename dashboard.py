@@ -279,8 +279,8 @@ with tab4:
     max_cases = st.slider(
         'Number of cases to use',
         min_value=1,
-        max_value=min(20, max(1, n_fails)),
-        value=min(15, max(1, n_fails)),
+        max_value=n_fails,
+        value=n_fails,,
         disabled=not is_admin
     )
     sample = tov_fails.head(max_cases)
