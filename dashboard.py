@@ -276,14 +276,20 @@ with tab4:
     n_fails = len(tov_fails)
     st.markdown(f'**{n_fails} failing/partial cases** in selected run.')
 
-    max_cases = st.slider(
-        'Number of cases to use',
-        min_value=1,
-        max_value=n_fails,
-        value=n_fails,
-        disabled=not is_admin
-    )
-    sample = tov_fails.head(max_cases)
+    col_s1, col_s2 = st.columns(2)
+    with col_s1:
+        gen_cases = st.slider(
+            'Cases for revision generation',
+            min_value=1, max_value=n_fails, value=n_fails,
+            disabled=not is_admin)
+    with col_s2:
+        judge_cases = st.slider(
+            'Cases for judge',
+            min_value=1, max_value=min(30, n_fails), value=min(20, n_fails),
+            disabled=not is_admin)
+
+    gen_sample   = tov_fails.head(gen_cases)
+    judge_sample = tov_fails.head(judge_cases)
 
     # ── Step 1: Generate revision ─────────────────────────────────
     st.markdown('### Step 1 — Generate revision')
@@ -302,14 +308,14 @@ with tab4:
                     f"  Fail criteria: {r.get('fail_criteria','')}\n"
                     f"  Actual response: {str(r['actual_response'])[:300]}\n"
                     f"  Judge reason: {r['judge_reason']}"
-                    for _, r in sample.iterrows()
+                    for _, r in gen_sample.iterrows()
                 ])
                 generate_prompt = f"""You are a prompt engineer improving a tone of voice prompt for Connie, a UK holiday cottage booking assistant for Sykes Holidays.
 
 Here is the current prompt:
 {current_prompt}
 
-Here are {len(sample)} failing evaluation cases showing where Connie is not meeting expectations:
+Here are {len(gen_sample)} failing evaluation cases showing where Connie is not meeting expectations:
 {cases_text}
 
 Your task:
@@ -384,8 +390,8 @@ Your task:
             else:
                 client = ant.Anthropic(api_key=api_key)
                 results = []
-                with st.spinner(f'Judging {len(sample)} cases...'):
-                    for _, row in sample.iterrows():
+                with st.spinner(f'Judging {len(judge_sample)} cases...'):
+                    for _, row in judge_sample.iterrows():
                         judge_prompt = f"""You are evaluating two versions of a tone of voice prompt for Connie, a holiday booking assistant for Sykes Holidays.
 
 CURRENT PROMPT:
