@@ -194,20 +194,89 @@ with tab3:
                         st.success(f"**Suggested fix:** {s['suggestion']}")
 with tab4:
     st.subheader('Tone of Voice Lab')
-    st.caption('Compare your current ToV prompt against a proposed revision. Claude judges which better handles failing cases.')
+    st.caption('Step 1: Generate a revision based on failing cases. Step 2: Run Judge to compare. Step 3: Save if better.')
 
-    # Load current prompt
+    import anthropic as ant
+    import os
+
+    # ── Load current prompt ───────────────────────────────────────
     try:
         with open('prompts/tov_prompt.md', encoding='utf-8') as f:
             current_prompt = f.read()
     except FileNotFoundError:
         current_prompt = ""
 
+    # ── Session state for generated revision ─────────────────────
+    if 'generated_revision' not in st.session_state:
+        st.session_state.generated_revision = current_prompt
+
+    # ── Pull failing cases ────────────────────────────────────────
+    tov_fails = load_results(selected_run)
+    tov_fails = tov_fails[tov_fails['overall_result'].isin(['fail', 'partial'])]
+    n_fails = len(tov_fails)
+    st.markdown(f'**{n_fails} failing/partial cases** in selected run.')
+
+    max_cases = st.slider(
+        'Number of cases to use',
+        min_value=1,
+        max_value=min(20, max(1, n_fails)),
+        value=min(8, max(1, n_fails))
+    )
+    sample = tov_fails.head(max_cases)
+
+    # ── Step 1: Generate revision ─────────────────────────────────
+    st.markdown('### Step 1 — Generate revision')
+    if st.button('Generate revision', disabled=(n_fails == 0)):
+        api_key = os.getenv('ANTHROPIC_API_KEY')
+        if not api_key:
+            st.error('ANTHROPIC_API_KEY not set in .env')
+        else:
+            client = ant.Anthropic(api_key=api_key)
+            cases_text = "\n\n".join([
+                f"Case {r['case_id']} ({label(r['section'])}):\n"
+                f"  Query: {r['query']}\n"
+                f"  Expected action: {r['expected_action']}\n"
+                f"  Pass criteria: {r.get('pass_criteria','')}\n"
+                f"  Fail criteria: {r.get('fail_criteria','')}\n"
+                f"  Actual response: {str(r['actual_response'])[:300]}\n"
+                f"  Judge reason: {r['judge_reason']}"
+                for _, r in sample.iterrows()
+            ])
+
+            generate_prompt = f"""You are a prompt engineer improving a tone of voice prompt for Connie, a UK holiday cottage booking assistant for Sykes Holidays.
+
+Here is the current prompt:
+{current_prompt}
+
+Here are {len(sample)} failing evaluation cases showing where Connie is not meeting expectations:
+{cases_text}
+
+Your task:
+1. Identify the specific patterns causing failures
+2. Produce a revised version of the full prompt that addresses these failures
+3. Keep everything that is working — only change what needs to change
+4. Do not add unnecessary length
+5. Return ONLY the revised prompt text, no explanation, no preamble"""
+
+            with st.spinner('Generating revision...'):
+                try:
+                    resp = client.messages.create(
+                        model='claude-sonnet-4-20250514',
+                        max_tokens=2000,
+                        messages=[{'role': 'user', 'content': generate_prompt}]
+                    )
+                    st.session_state.generated_revision = resp.content[0].text.strip()
+                    st.success('Revision generated. Review it in the panel below, then run the judge.')
+                except Exception as e:
+                    st.error(f'Generation failed: {e}')
+
+    # ── Side by side prompt panels ────────────────────────────────
+    st.markdown('### Step 2 — Review & edit')
     col1, col2 = st.columns(2)
     with col1:
         st.markdown('**Current prompt**')
         current_display = st.text_area(
-            'Current ToV prompt',
+            'current_prompt_area',
             value=current_prompt,
             height=400,
             label_visibility='collapsed'
@@ -215,36 +284,25 @@ with tab4:
     with col2:
         st.markdown('**Proposed revision**')
         proposed_display = st.text_area(
-            'Proposed ToV prompt',
-            value=current_prompt,
+            'proposed_prompt_area',
+            value=st.session_state.generated_revision,
             height=400,
-            placeholder='Paste your revised prompt here...',
             label_visibility='collapsed'
         )
 
-    # Pull failing ToV cases for this run
-    tov_fails = load_results(selected_run)
-    tov_fails = tov_fails[tov_fails['overall_result'].isin(['fail', 'partial'])]
-    n_fails = len(tov_fails)
-    st.markdown(f'**{n_fails} failing/partial cases in selected run** will be used as test cases.')
-
-    max_cases = st.slider('Number of cases to judge', min_value=1, max_value=min(20, max(1, n_fails)), value=min(5, max(1, n_fails)))
-
+    # ── Step 3: Run judge ─────────────────────────────────────────
+    st.markdown('### Step 3 — Run judge')
     if st.button('Run Judge', disabled=(n_fails == 0)):
-        import anthropic as ant
-        import os
-
         api_key = os.getenv('ANTHROPIC_API_KEY')
         if not api_key:
             st.error('ANTHROPIC_API_KEY not set in .env')
         else:
             client = ant.Anthropic(api_key=api_key)
-            sample = tov_fails.head(max_cases)
             results = []
 
             with st.spinner(f'Judging {len(sample)} cases...'):
                 for _, row in sample.iterrows():
-                    judge_prompt = f"""You are evaluating two versions of a tone of voice prompt for Connie, a holiday booking assistant.
+                    judge_prompt = f"""You are evaluating two versions of a tone of voice prompt for Connie, a holiday booking assistant for Sykes Holidays.
 
 CURRENT PROMPT:
 {current_display}
@@ -264,10 +322,9 @@ Respond in JSON only:
 {{
   "winner": "current" or "proposed" or "tie",
   "reason": "one sentence explanation",
-  "current_score": 1-3,
-  "proposed_score": 1-3
+  "current_score": 1,
+  "proposed_score": 1
 }}"""
-
                     try:
                         resp = client.messages.create(
                             model='claude-sonnet-4-20250514',
@@ -275,7 +332,6 @@ Respond in JSON only:
                             messages=[{'role': 'user', 'content': judge_prompt}]
                         )
                         raw = resp.content[0].text.strip()
-                        # Strip markdown code fences if present
                         if raw.startswith('```'):
                             raw = '\n'.join(raw.split('\n')[1:-1])
                         verdict = json.loads(raw)
@@ -294,7 +350,6 @@ Respond in JSON only:
                             'proposed_score': None
                         })
 
-            # Summary
             winners = [r['winner'] for r in results if r['winner'] != 'error']
             current_wins  = winners.count('current')
             proposed_wins = winners.count('proposed')
@@ -314,18 +369,23 @@ Respond in JSON only:
             else:
                 st.info('Too close to call — try more cases.')
 
-            # Detail table
             results_df = pd.DataFrame(results)
             st.dataframe(
-                results_df[['case_id', 'section', 'query', 'winner', 'current_score', 'proposed_score', 'reason']],
+                results_df[['case_id', 'section', 'query', 'winner',
+                             'current_score', 'proposed_score', 'reason']],
                 use_container_width=True, hide_index=True)
 
-            # Option to save proposed as new current
+            # ── Step 4: Save ──────────────────────────────────────
+            st.markdown('### Step 4 — Save')
             if proposed_wins > current_wins:
                 if st.button('Save proposed as current prompt'):
                     with open('prompts/tov_prompt.md', 'w', encoding='utf-8') as f:
                         f.write(proposed_display)
-                    st.success('Saved. Commit and push to make it permanent.')
+                    st.session_state.generated_revision = proposed_display
+                    st.success('Saved locally. Run: git add prompts/tov_prompt.md && git commit -m "Update ToV prompt" && git push origin main')
+            else:
+                st.info('Proposed did not outperform current — nothing saved.')
+                
 # ── Run summary ───────────────────────────────────────────────────────
 st.markdown('---')
 st.subheader('Run Summary')
