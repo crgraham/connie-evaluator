@@ -118,15 +118,38 @@ if __name__ == "__main__":
     parser.add_argument("--skip",      type=int,   default=0)
     parser.add_argument("--dataset",   type=str,   default=None)
     parser.add_argument("--iteration", type=str,   default="untagged")
+    parser.add_argument("--all",       action="store_true")
     args = parser.parse_args()
 
-    run_pipeline(
-        limit=args.limit,
-        section_filter=args.section,
-        run_id=args.run_id,
-        delay=args.delay,
-        dry_run=args.dry_run,
-        skip=args.skip,
-        dataset_path=args.dataset,
-        iteration=args.iteration
-    )
+    ALL_DATASETS = [
+        "data/connie_eval_full.jsonl",
+        "data/connie_tov_eval.jsonl",
+        "data/connie_rec_eval.jsonl",
+        "data/connie_extended_eval.jsonl",
+        "data/connie_issues_eval.jsonl",
+    ]
+
+    if args.all:
+        for dataset in ALL_DATASETS:
+            print(f"\nRunning: {dataset}")
+            run_pipeline(
+                limit=args.limit,
+                section_filter=args.section,
+                run_id=None,
+                delay=args.delay,
+                dry_run=args.dry_run,
+                skip=args.skip,
+                dataset_path=dataset,
+                iteration=args.iteration
+            )
+    else:
+        run_pipeline(
+            limit=args.limit,
+            section_filter=args.section,
+            run_id=args.run_id,
+            delay=args.delay,
+            dry_run=args.dry_run,
+            skip=args.skip,
+            dataset_path=args.dataset,
+            iteration=args.iteration
+        )
