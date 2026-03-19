@@ -92,20 +92,11 @@ def save_result(run_id, case, actual_response, det_results, judge):
         return r.get(field) if r.get("result") not in ("skip", None) else None
 
     # ── Overall result logic ──────────────────────────────────────────
-    # Deterministic checkers use 0/1 — a "fail" result is a hard override
-    det_hard_fail = any(
-        r.get("result") == "fail"
-        for r in det_results
-        if r.get("result") not in ("skip", "error", None)
-    )
+    # Judge is always source of truth for overall_result
+    judge_result = judge.get("result")
+    judge_score  = judge.get("score")
 
-    # LLM judge drives the primary verdict
-    judge_result = judge.get("result")   # "pass" / "partial" / "fail"
-    judge_score  = judge.get("score")    # 1 / 2 / 3
-
-    if det_hard_fail:
-        overall = "fail"
-    elif judge_result in ("pass", "partial", "fail"):
+    if judge_result in ("pass", "partial", "fail"):
         overall = judge_result
     elif judge_score == 3:
         overall = "pass"
